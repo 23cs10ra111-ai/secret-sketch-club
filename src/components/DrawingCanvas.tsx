@@ -11,11 +11,12 @@ interface Stroke {
 interface DrawingCanvasProps {
   isArtist: boolean;
   onStroke: (stroke: Stroke) => void;
+  onClear: () => void;
   incomingStrokes: Stroke[];
-  clearSignal: number; // increment to clear
+  clearSignal: number;
 }
 
-const DrawingCanvas = ({ isArtist, onStroke, incomingStrokes, clearSignal }: DrawingCanvasProps) => {
+const DrawingCanvas = ({ isArtist, onStroke, onClear, incomingStrokes, clearSignal }: DrawingCanvasProps) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const isDrawing = useRef(false);
   const lastProcessed = useRef(0);
@@ -28,6 +29,7 @@ const DrawingCanvas = ({ isArtist, onStroke, incomingStrokes, clearSignal }: Dra
     if (!ctx || !canvas) return;
     ctx.fillStyle = "#ffffff";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
+    lastProcessed.current = 0;
   }, []);
 
   useEffect(() => {
@@ -102,11 +104,6 @@ const DrawingCanvas = ({ isArtist, onStroke, incomingStrokes, clearSignal }: Dra
     isDrawing.current = false;
   };
 
-  const handleClear = () => {
-    clearCanvas();
-    onStroke({ x: 0, y: 0, type: "start" }); // We'll use a special "clear" broadcast
-  };
-
   return (
     <div className="space-y-2">
       <canvas
@@ -124,7 +121,7 @@ const DrawingCanvas = ({ isArtist, onStroke, incomingStrokes, clearSignal }: Dra
         onTouchEnd={handleEnd}
       />
       {isArtist && (
-        <Button onClick={handleClear} variant="outline" size="sm" className="font-hand">
+        <Button onClick={onClear} variant="outline" size="sm" className="font-hand">
           <Eraser className="mr-2 h-4 w-4" /> Clear Canvas
         </Button>
       )}

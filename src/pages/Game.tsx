@@ -33,10 +33,16 @@ const Game = () => {
   const timerRef = useRef<ReturnType<typeof setInterval>>();
   const channelRef = useRef<any>(null);
   const drawChannelRef = useRef<any>(null);
+  const isArtistRef = useRef(false);
 
   const gameState = room?.game_state;
   const isArtist = gameState?.artist_id === currentPlayer?.id;
   const artistPlayer = players.find((p) => p.id === gameState?.artist_id);
+
+  // Keep ref in sync
+  useEffect(() => {
+    isArtistRef.current = isArtist;
+  }, [isArtist]);
 
   // Load room & round data
   useEffect(() => {
@@ -69,7 +75,6 @@ const Game = () => {
 
     if (roundData) {
       setCurrentRound(roundData as any);
-      // Only artist sees secret word
       const gs = (roomData as any).game_state;
       const me = playersData?.find((p: any) => p.user_id === userId);
       if (me && gs?.artist_id === me.id) {
@@ -98,7 +103,7 @@ const Game = () => {
       .on("broadcast", { event: "next_round" }, ({ payload }) => {
         handleNextRound(payload);
       })
-      .on("broadcast", { event: "game_over" }, ({ payload }) => {
+      .on("broadcast", { event: "game_over" }, () => {
         setGameOver(true);
       })
       .on("broadcast", { event: "clear_canvas" }, () => {
@@ -108,15 +113,18 @@ const Game = () => {
       .on("postgres_changes", { event: "UPDATE", schema: "public", table: "rooms", filter: `id=eq.${room.id}` }, (payload) => {
         setRoom(payload.new as any);
       })
+      .on("postgres_changes", { event: "*", schema: "public", table: "players", filter: `room_id=eq.${room.id}` }, () => {
+        refreshPlayers();
+      })
       .subscribe();
 
-    // Drawing channel
+    // Drawing channel - use ref to avoid closure stale isArtist
     const drawCh = supabase.channel(`drawing-${room.id}`);
     drawChannelRef.current = drawCh;
 
     drawCh
       .on("broadcast", { event: "stroke" }, ({ payload }) => {
-        if (!isArtist) {
+        if (!isArtistRef.current) {
           setIncomingStrokes((prev) => [...prev, payload]);
         }
       })
@@ -126,7 +134,13 @@ const Game = () => {
       supabase.removeChannel(roomChannel);
       supabase.removeChannel(drawCh);
     };
-  }, [room?.id, isArtist]);
+  }, [room?.id]);
+
+  const refreshPlayers = async () => {
+    if (!room) return;
+    const { data } = await supabase.from("players").select().eq("room_id", room.id);
+    if (data) setPlayers(data as any);
+  };
 
   // Timer
   useEffect(() => {
@@ -149,7 +163,6 @@ const Game = () => {
     setRoundEnded(true);
     clearInterval(timerRef.current);
 
-    // Update round
     await supabase.from("rounds").update({
       ended_at: new Date().toISOString(),
       correct_guesser_id: guesserId,
@@ -157,8 +170,14 @@ const Game = () => {
 
     // Award points
     if (guesserId) {
-      await supabase.from("players").update({ score: (players.find(p => p.id === guesserId)?.score || 0) + 10 }).eq("id", guesserId);
-      await supabase.from("players").update({ score: (currentPlayer?.score || 0) + 5 }).eq("id", gameState?.artist_id);
+      const guesser = players.find(p => p.id === guesserId);
+      const artist = players.find(p => p.id === gameState?.artist_id);
+      if (guesser) {
+        await supabase.from("players").update({ score: guesser.score + 10 }).eq("id", guesserId);
+      }
+      if (artist) {
+        await supabase.from("players").update({ score: artist.score + 5 }).eq("id", artist.id);
+      }
     }
 
     // Broadcast round end
@@ -173,12 +192,12 @@ const Game = () => {
     });
 
     // Refresh players
-    const { data: updated } = await supabase.from("players").select().eq("room_id", room.id);
-    setPlayers((updated || []) as any);
+    await refreshPlayers();
 
     // After 5 seconds, start next round or end game
     setTimeout(async () => {
-      const gs = room.game_state;
+      const gs = useGameStore.getState().room?.game_state;
+      if (!gs) return;
       const round = gs.current_round;
       if (round >= gs.total_rounds) {
         channelRef.current?.send({ type: "broadcast", event: "game_over", payload: {} });
@@ -192,8 +211,10 @@ const Game = () => {
 
   const startNextRound = async (roundNum: number) => {
     if (!room) return;
-    const gs = room.game_state;
-    const playerIds = players.map(p => p.id);
+    const latestRoom = useGameStore.getState().room;
+    const gs = latestRoom?.game_state || room.game_state;
+    const latestPlayers = useGameStore.getState().players;
+    const playerIds = latestPlayers.map(p => p.id);
     const currentArtistIdx = playerIds.indexOf(gs.artist_id || "");
     const nextArtistId = playerIds[(currentArtistIdx + 1) % playerIds.length];
     const word = getRandomWord(gs.category);
@@ -219,7 +240,8 @@ const Game = () => {
     setIncomingStrokes([]);
     setClearSignal(s => s + 1);
     setCurrentRound(newRound as any);
-    setSecretWord(nextArtistId === currentPlayer?.id ? word : null);
+    const cp = useGameStore.getState().currentPlayer;
+    setSecretWord(nextArtistId === cp?.id ? word : null);
     clearChat();
   };
 
@@ -239,12 +261,7 @@ const Game = () => {
     setRoundEnded(true);
     clearInterval(timerRef.current);
     setSecretWord(payload.word);
-    // Reload players for updated scores
-    if (room) {
-      supabase.from("players").select().eq("room_id", room.id).then(({ data }) => {
-        if (data) setPlayers(data as any);
-      });
-    }
+    refreshPlayers();
   };
 
   const handleNextRound = async (payload: any) => {
@@ -252,18 +269,17 @@ const Game = () => {
     setIncomingStrokes([]);
     setClearSignal(s => s + 1);
     clearChat();
-    // Load the new round
     if (room) {
       const { data } = await supabase.from("rounds").select().eq("room_id", room.id).is("ended_at", null).order("started_at", { ascending: false }).limit(1).maybeSingle();
       if (data) {
         setCurrentRound(data as any);
-        if (payload.artistId === currentPlayer?.id) {
+        const cp = useGameStore.getState().currentPlayer;
+        if (payload.artistId === cp?.id) {
           setSecretWord(data.secret_word);
         } else {
           setSecretWord(null);
         }
       }
-      // Refresh room
       const { data: roomData } = await supabase.from("rooms").select().eq("id", room.id).single();
       if (roomData) setRoom(roomData as any);
     }
@@ -278,27 +294,36 @@ const Game = () => {
     channelRef.current?.send({ type: "broadcast", event: "clear_canvas", payload: {} });
   };
 
-  const handleSendMessage = (text: string) => {
-    if (!currentPlayer || !currentRound) return;
+  const handleSendMessage = async (text: string) => {
+    const cp = useGameStore.getState().currentPlayer;
+    const cr = useGameStore.getState().currentRound;
+    if (!cp || !cr) return;
 
-    // Check if correct guess (case-insensitive)
-    if (currentRound.secret_word && text.toLowerCase() === currentRound.secret_word.toLowerCase()) {
-      // Correct guess!
-      channelRef.current?.send({
-        type: "broadcast",
-        event: "correct_guess",
-        payload: { playerId: currentPlayer.id, username: currentPlayer.username },
+    // Validate guess server-side
+    try {
+      const { data, error } = await supabase.functions.invoke("submit-guess", {
+        body: { round_id: cr.id, guess: text, player_id: cp.id },
       });
-      if (isArtist) return; // shouldn't happen but safety
-      endRound(currentPlayer.id);
-      return;
+
+      if (data?.correct) {
+        // Correct guess!
+        channelRef.current?.send({
+          type: "broadcast",
+          event: "correct_guess",
+          payload: { playerId: cp.id, username: cp.username },
+        });
+        endRound(cp.id);
+        return;
+      }
+    } catch (e) {
+      // Fall through to regular message
     }
 
     // Regular message
     const msg: ChatMessage = {
       id: crypto.randomUUID(),
-      player_id: currentPlayer.id,
-      username: currentPlayer.username,
+      player_id: cp.id,
+      username: cp.username,
       message: text,
       is_system: false,
       timestamp: Date.now(),
@@ -309,7 +334,6 @@ const Game = () => {
 
   const handlePlayAgain = async () => {
     if (!room) return;
-    // Reset scores
     for (const p of players) {
       await supabase.from("players").update({ score: 0 }).eq("id", p.id);
     }
@@ -332,7 +356,6 @@ const Game = () => {
   // Game Over Screen
   if (gameOver) {
     const sorted = [...players].sort((a, b) => b.score - a.score);
-    const winner = sorted[0];
     return (
       <div className="flex min-h-screen items-center justify-center bg-background p-4">
         <Card className="sketch-border bg-card w-full max-w-md">
@@ -417,6 +440,7 @@ const Game = () => {
           <DrawingCanvas
             isArtist={isArtist}
             onStroke={handleStroke}
+            onClear={handleClearCanvas}
             incomingStrokes={incomingStrokes}
             clearSignal={clearSignal}
           />
