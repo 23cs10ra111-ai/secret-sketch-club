@@ -186,6 +186,8 @@ const Lobby = () => {
                     <SelectItem value="animals">🐾 Animals</SelectItem>
                     <SelectItem value="objects">🚀 Objects</SelectItem>
                     <SelectItem value="food">🍕 Food</SelectItem>
+                    <SelectItem value="places">🏖️ Places</SelectItem>
+                    <SelectItem value="actions">🏃 Actions</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
